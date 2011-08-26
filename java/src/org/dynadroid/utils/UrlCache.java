@@ -1,6 +1,7 @@
 package org.dynadroid.utils;
 
 
+import org.apache.http.HttpResponse;
 import org.dynadroid.Application;
 import org.dynadroid.utils.ObjectStore;
 
@@ -46,15 +47,15 @@ public class UrlCache {
         return false;
     }
 
-    public synchronized static String get(String url) {
+    public synchronized static HttpResponse get(String url) {
         if (!removeIfExpired(url)) {
-            return urlMap.get(url).data;
+            return urlMap.get(url).response;
         }
         return null;
     }
 
-    public synchronized static void set(String url, String data, long duration) {
-        urlMap.put(url,new UrlData(data, duration));
+    public synchronized static void set(String url, HttpResponse response, long duration) {
+        urlMap.put(url,new UrlData(response, duration));
     }
 
     public synchronized static void expireAll() {
@@ -70,12 +71,12 @@ public class UrlCache {
     }
 
     private static class UrlData implements Serializable {
-        public String data;
+        private HttpResponse response;
         private long duration;
         private long timestamp;
 
-        private UrlData(String data, long duration) {
-            this.data = data;
+        private UrlData(HttpResponse response, long duration) {
+            this.response = response;
             this.duration = duration;
             this.timestamp = new Date().getTime();
         }

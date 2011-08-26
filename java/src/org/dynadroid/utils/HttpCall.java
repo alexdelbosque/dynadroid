@@ -1,22 +1,21 @@
 package org.dynadroid.utils;
 
 import android.os.AsyncTask;
+import org.apache.http.Header;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpResponse;
 import org.apache.http.HttpVersion;
-import org.apache.http.NameValuePair;
 import org.apache.http.client.HttpClient;
-import org.apache.http.client.entity.UrlEncodedFormEntity;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.client.methods.HttpPost;
+import org.apache.http.client.methods.*;
 import org.apache.http.conn.ClientConnectionManager;
 import org.apache.http.conn.scheme.PlainSocketFactory;
 import org.apache.http.conn.scheme.Scheme;
 import org.apache.http.conn.scheme.SchemeRegistry;
 import org.apache.http.conn.ssl.SSLSocketFactory;
+import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.DefaultHttpClient;
 import org.apache.http.impl.conn.tsccm.ThreadSafeClientConnManager;
-import org.apache.http.message.BasicNameValuePair;
+import org.apache.http.message.BasicHeader;
 import org.apache.http.params.BasicHttpParams;
 import org.apache.http.params.HttpParams;
 import org.apache.http.params.HttpProtocolParams;
@@ -30,12 +29,12 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.Socket;
+import java.net.URI;
 import java.net.UnknownHostException;
 import java.security.*;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 
 /**
@@ -47,13 +46,14 @@ import java.util.List;
  */
 public class HttpCall {
     private static HttpClient httpClient;
-    private static HashMap<String, String> headers = new HashMap();
     public static long DEFAULT_URL_CACHE_DURATION = 1000 * 60 * 60; //one hour
 
-    public String result, url, data;
+    private List<Header> headers = new ArrayList<Header>();
+    public String result, url, data, cacheTag;
     public boolean lookInCache = true;
     public boolean offline = false;
     public long urlCacheDuration = DEFAULT_URL_CACHE_DURATION;
+    public HttpResponse response;
 
     public HttpCall() {
 
@@ -74,7 +74,7 @@ public class HttpCall {
     }
 
     public HttpCall addHeader(String name, String value) {
-        headers.put(name, value);
+        headers.add(new BasicHeader(name,value));
         return this;
     }
 
@@ -88,39 +88,102 @@ public class HttpCall {
         return this;
     }
 
-    public HttpCall get(final HttpDelegate httpDelegate) {
-        final HttpCall me = this;
-        new AsyncTask() {
-            protected Object doInBackground(Object... objects) {
-                doGet(me);
-                return httpDelegate;
-            }
+    public HttpCall cacheTag(String tag) {
+        this.cacheTag = tag;
+        return this;
+    }
 
-            protected void onPostExecute(Object o) {
-                //System.out.println("!!!!!!onPostExecute httpCall.result = " + me.result);
-                ((HttpDelegate) o).completed(me);
-            }
-        }.execute(null);
+    public HttpCall get(final HttpDelegate httpDelegate) {
+        if (!retrieveFromCache(httpDelegate)) {
+            HttpGet get = new HttpGet();
+            httpDelegate.addCompleteTask(new AddToCacheDelegateTask());
+            performActionInBackground(get, httpDelegate);
+        }
         return this;
     }
 
     public HttpCall post(final HttpDelegate httpDelegate) {
-        final HttpCall me = this;
-        new AsyncTask() {
-            protected Object doInBackground(Object... objects) {
-                doPost(me);
-                return httpDelegate;
-            }
-
-            protected void onPostExecute(Object o) {
-                ((HttpDelegate) o).completed(me);
-            }
-        }.execute(null);
+        HttpPost post = new HttpPost();
+        try {
+            post.setEntity(new StringEntity(this.data));
+            performActionInBackground(post, httpDelegate);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
         return this;
     }
 
     public HttpCall post(String data, final HttpDelegate httpDelegate) {
         return data(data).post(httpDelegate);
+    }
+    
+    public HttpCall put(final HttpDelegate httpDelegate) {
+        HttpPut put = new HttpPut();
+        try {
+            put.setEntity(new StringEntity(this.data));
+            performActionInBackground(put, httpDelegate);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        return this;
+    }
+    
+    public HttpCall put(String data, final HttpDelegate httpDelegate) {
+        return data(data).post(httpDelegate);
+    }
+    
+    public HttpCall delete(final HttpDelegate httpDelegate) {
+        HttpDelete delete = new HttpDelete();
+        performActionInBackground(delete, httpDelegate);
+        return this;
+    }
+    
+    public HttpCall delete(String data, final HttpDelegate httpDelegate) {
+        return data(data).delete(httpDelegate);
+    }
+
+    private String getCacheKey() {
+        return (this.cacheTag != null) ? this.url + "_(" +this.cacheTag+")" : this.url;
+    }
+
+    private boolean retrieveFromCache(HttpDelegate httpDelegate) {
+        HttpResponse response = this.lookInCache ? UrlCache.get(this.getCacheKey()) : null;
+        if (response != null) {
+            try {
+                this.updateWithResponse(response);
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+            httpDelegate.complete(this);
+            return true;
+        }
+        return false;
+    }
+
+    private void performActionInBackground(final HttpRequestBase action, final HttpDelegate httpDelegate) {
+        final HttpCall me = this;
+        new AsyncTask() {
+            protected Object doInBackground(Object... objects) {
+                performAction(me, action);
+                return httpDelegate;
+            }
+
+            protected void onPostExecute(Object o) {
+                ((HttpDelegate) o).complete(me);
+            }
+        }.execute();
+    }
+
+    private void updateWithResponse(HttpResponse response) throws IllegalStateException, IOException {
+        this.response = response;
+        HttpEntity entity = response.getEntity();
+        BufferedReader br = new BufferedReader(new InputStreamReader(entity.getContent()));
+        String line, result = "";
+        while ((line = br.readLine()) != null) {
+            result += line;
+        }
+        this.result = result;
     }
 
     protected static synchronized HttpClient httpClient() {
@@ -149,63 +212,34 @@ public class HttpCall {
         }
         return httpClient;
     }
-
-    protected static synchronized void doGet(HttpCall httpCall) {
+    
+    protected static synchronized void performAction(HttpCall httpCall, HttpRequestBase action) {
         try {
-            String result = httpCall.lookInCache ? UrlCache.get(httpCall.url) : null;
-            if (result == null) {
-                //System.out.println("!!!!!loading from network " + httpCall.url);
-                if (!Application.isOnline()) {
-                    httpCall.offline = true;
-                } else {
-                    HttpGet get = new HttpGet(httpCall.url);
-                    for (String name : headers.keySet()) {
-                        get.addHeader(name, headers.get(name));
-                    }
-                    HttpResponse response = httpClient().execute(get);
-                    result = processEntity(response.getEntity());
-                    //System.out.println("********Result" + result);
-                    UrlCache.set(httpCall.url, result, httpCall.urlCacheDuration);
-                    httpCall.offline = false;
-                }
-            } else {
-                //System.out.println("!!!!!loading from CACHE " + httpCall.url);
-            }
-            httpCall.result = result;
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
+            action.setURI(new URI(httpCall.url));
 
-    protected static synchronized void doPost(HttpCall httpCall) {
-        try {
             if (!Application.isOnline()) {
                 httpCall.offline = true;
             } else {
-                HttpPost httpPost = new HttpPost(httpCall.url);
-                for (String name : headers.keySet()) {
-                    httpPost.addHeader(name, headers.get(name));
+                for (Header header : httpCall.headers) {
+                    action.addHeader(header);
                 }
-                List<NameValuePair> nameValuePairs = new ArrayList<NameValuePair>();
-                nameValuePairs.add(new BasicNameValuePair("error", httpCall.data));
-                httpPost.setEntity(new UrlEncodedFormEntity(nameValuePairs));
-                HttpResponse response = httpClient().execute(httpPost);
-                String result = processEntity(response.getEntity());
-                httpCall.result = result;
+                HttpResponse response = httpClient().execute(action);
+                httpCall.updateWithResponse(response);
                 httpCall.offline = false;
             }
+
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
-    private static synchronized String processEntity(HttpEntity entity) throws IllegalStateException, IOException {
-        BufferedReader br = new BufferedReader(new InputStreamReader(entity.getContent()));
-        String line, result = "";
-        while ((line = br.readLine()) != null) {
-            result += line;
+    private class AddToCacheDelegateTask implements HttpDelegateTask {
+        public void doTask() {
+            int status = response.getStatusLine().getStatusCode();
+            if (status >= 200 && status <= 299) {
+                UrlCache.set(getCacheKey(), response, urlCacheDuration);
+            }
         }
-        return result;
     }
 
     public static class MySSLSocketFactory extends SSLSocketFactory {
