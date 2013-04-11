@@ -35,8 +35,9 @@
         <item name="android:orientation">vertical</item>
     </style>
 
-    <style name="busy" parent="android:Theme.Dialog">
+    <style name="busy">
         <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:textColor">#FFFFFF</item>
     </style>
 
 </resources>
